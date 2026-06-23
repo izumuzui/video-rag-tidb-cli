@@ -1,0 +1,29 @@
+.venv/
+.work/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+video-rag-retrieval-eval-zenn-draft.md
+
+# Generated evaluation artifacts
+eval/__pycache__/
+eval/*.json
+eval/*.csv
+
+# Keep evaluation code and docs tracked
+!eval/README.md
+!eval/__init__.py
+!eval/*.py
+
+data/*
+!data/.gitkeep
+!data/qvhighlights/
+data/qvhighlights/*
+!data/qvhighlights/.gitkeep
+!data/qvhighlights/annotations/
+!data/qvhighlights/videos/
+data/qvhighlights/annotations/*
+data/qvhighlights/videos/*
+!data/qvhighlights/annotations/.gitkeep
+!data/qvhighlights/videos/.gitkeep
