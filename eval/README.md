@@ -4,11 +4,11 @@
 
 ## 目的
 
-今回見たいのは、次の3方式の retrieval quality です。
+今回見たいのは、次の検索方式の retrieval quality です。
 
-- `keyword`
 - `vector`
 - `hybrid`
+- `hybrid_rerank`
 
 生成品質ではなく、あくまで「正解セグメントを上位に返せるか」を比較します。
 
@@ -36,6 +36,7 @@
 - `prepare_qvhighlights.py`: QVHighlights の annotation を評価用 JSON に変換する
 - `dataset_builder.py`: GT 時間区間を `relevant_ids` に変換する
 - `metrics.py`: Hit Rate / MRR / nDCG
+- `reranker.py`: `hybrid` 上位候補を Cross-Encoder で並べ替える
 - `run_eval.py`: 3方式を実行して結果を JSON / CSV に保存する
 
 ## スクリプトの流れ
@@ -221,6 +222,24 @@ data/
 - `results.json`
 - `results.csv`
 
+Reranker を使う場合は、追加で before / after のダンプも残せます。
+
+```bash
+.venv/bin/python eval/run_eval.py \
+  --dataset eval/dataset.json \
+  --output-json eval/results_rerank.json \
+  --output-csv eval/results_rerank.csv \
+  --dump-rerank-details eval/results_rerank_debug.json \
+  --top-k 10 \
+  --ks 1,3,5,10 \
+  --method multi_frame \
+  --provider gemini \
+  --modes vector,hybrid,hybrid_rerank \
+  --rerank-pool-size 20
+```
+
+`hybrid_rerank` は、まず `hybrid` の上位候補を `--rerank-pool-size` 件だけ集め、その候補に対して Cross-Encoder をかけます。CPU 環境ではここが一番時間を使うので、最初は `20` 前後から始めるのをおすすめします。
+
 keyword 実装を見直す前の旧結果を残したい場合は、出力先ファイル名を変えて保存します。今回の検証では、旧版と新しい単語分割版を別ファイルに分けて比較できるようにしました。
 
 ## 指標
@@ -241,3 +260,5 @@ keyword 実装を見直す前の旧結果を残したい場合は、出力先フ
 - `dataset_builder.py` は複数の GT 区間を持つクエリも扱えます。
 - `run_eval.py` は既存検索ロジックをそのまま呼びます。検索アルゴリズム自体は変えません。
 - `vector` と `hybrid` はクエリ embedding を毎回生成するので、クエリ数が多いと API コストがかかります。
+- `hybrid_rerank` は `hybrid` の後段だけを並べ替えます。`keyword` / `vector` / `hybrid` 本体のロジックは変えていません。
+- `sentence-transformers` と `torch` を素の Mac に入れたくない場合は、`Dockerfile` を使うのが安全です。
