@@ -23,7 +23,7 @@
 - `ffmpeg`
 - `ffprobe`
 
-Reranker を使う評価は `torch` や `sentence-transformers` が必要になるため、Mac の素の環境を汚したくない場合は Docker 実行を前提にしています。
+Reranker を使う評価は `torch` や `sentence-transformers` が必要になるため、Mac の素の環境を汚したくない場合は Docker 実行前提。
 
 ## セットアップ
 
@@ -135,9 +135,9 @@ Gemini で生成した index を検索するときは、クエリ側も `--provi
 
 ## Reranker 評価を Docker で回す
 
-Cross-Encoder の reranker は CPU でも動きますが、追加依存が重めです。このリポジトリでは Docker で隔離して実行できます。
+Cross-Encoder の reranker は CPU でも動作可能。ただし追加依存はやや重め。このリポジトリでは Docker で隔離実行。
 
-ビルド:
+ビルド手順:
 
 ```bash
 docker build -t video-rag-rerank .
@@ -183,4 +183,4 @@ docker run --rm \
 
 ## 注意
 
-このリポジトリは記事用の実験コード。実運用向けにエラーハンドリング、テスト、入出力形式、認証まわりを整えたものではない。
+このリポジトリは記事用の実験コード。実運用向けのエラーハンドリング、テスト、入出力形式、認証まわりの未整備。
