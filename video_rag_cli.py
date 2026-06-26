@@ -661,6 +661,21 @@ def reciprocal_rank_fusion(
     return results
 
 
+def hybrid_search_tidb(
+    connection,
+    query: str,
+    query_embedding: list[float],
+    top_k: int,
+    method: str | None,
+    *,
+    pool_size: int | None = None,
+) -> list[SearchHit]:
+    candidate_size = pool_size or top_k * 2
+    keyword_hits = keyword_search_tidb(connection, query, candidate_size, method)
+    vector_hits = vector_search_tidb(connection, query_embedding, candidate_size, method)
+    return reciprocal_rank_fusion(keyword_hits, vector_hits, top_k)
+
+
 def segment_key(video: Path, method: str, start: float, end: float) -> str:
     raw = f"{video.resolve()}:{method}:{start:.3f}:{end:.3f}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
@@ -861,7 +876,7 @@ def cmd_search_tidb(args: argparse.Namespace) -> int:
     query_embedding = None
 
     try:
-        if args.mode in {"vector", "hybrid"}:
+        if args.mode in {"vector", "hybrid", "hybrid_rerank"}:
             provider = make_provider(args.provider, args.gemini_model, args.embedding_model)
             query_embedding = provider.embed_text(args.query)
 
@@ -870,11 +885,28 @@ def cmd_search_tidb(args: argparse.Namespace) -> int:
         elif args.mode == "vector":
             assert query_embedding is not None
             hits = vector_search_tidb(connection, query_embedding, args.top_k, args.method)
-        else:
-            keyword_hits = keyword_search_tidb(connection, args.query, args.top_k * 2, args.method)
+        elif args.mode == "hybrid":
             assert query_embedding is not None
-            vector_hits = vector_search_tidb(connection, query_embedding, args.top_k * 2, args.method)
-            hits = reciprocal_rank_fusion(keyword_hits, vector_hits, args.top_k)
+            hits = hybrid_search_tidb(connection, args.query, query_embedding, args.top_k, args.method)
+        else:
+            assert query_embedding is not None
+            hybrid_hits = hybrid_search_tidb(
+                connection,
+                args.query,
+                query_embedding,
+                args.rerank_pool_size,
+                args.method,
+                pool_size=args.rerank_pool_size,
+            )
+            try:
+                from eval.reranker import CrossEncoderReranker, DEFAULT_RERANK_MODEL, rerank_hits
+            except ImportError as exc:
+                raise SystemExit(
+                    "Reranker dependencies are not installed. "
+                    "Install requirements-rerank.txt or use the Docker image."
+                ) from exc
+            reranker = CrossEncoderReranker(args.rerank_model or DEFAULT_RERANK_MODEL, device=args.rerank_device)
+            hits, _ = rerank_hits(args.query, hybrid_hits, reranker, top_k=args.top_k)
     finally:
         connection.close()
 
@@ -1053,12 +1085,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     search_tidb = subparsers.add_parser("search-tidb", help="Search segments stored in TiDB Cloud")
     search_tidb.add_argument("--query", required=True)
-    search_tidb.add_argument("--mode", choices=["keyword", "vector", "hybrid"], default="hybrid")
+    search_tidb.add_argument("--mode", choices=["keyword", "vector", "hybrid", "hybrid_rerank"], default="hybrid")
     search_tidb.add_argument("--top-k", type=int, default=5)
     search_tidb.add_argument("--method", choices=["transcript", "single_frame", "multi_frame", "video_clip"])
     search_tidb.add_argument("--provider", choices=["mock", "gemini"], default="gemini")
     search_tidb.add_argument("--gemini-model", default=None)
     search_tidb.add_argument("--embedding-model", default=None)
+    search_tidb.add_argument("--rerank-model", default=None)
+    search_tidb.add_argument("--rerank-device", default=None)
+    search_tidb.add_argument("--rerank-pool-size", type=int, default=20)
     search_tidb.set_defaults(func=cmd_search_tidb)
 
     return parser

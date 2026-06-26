@@ -1,0 +1,11 @@
+.git
+.venv
+.work
+__pycache__
+*.pyc
+.env
+data/qvhighlights/annotations/*
+data/qvhighlights/videos/*
+eval/*.json
+eval/*.csv
+video-rag-retrieval-eval-zenn-draft.md

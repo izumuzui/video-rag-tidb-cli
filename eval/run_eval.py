@@ -21,21 +21,51 @@ from video_rag_cli import (
 )
 
 from eval.metrics import hit_rate, mean, mrr, ndcg_at_k
+from eval.reranker import CrossEncoderReranker, DEFAULT_RERANK_MODEL, rerank_hits
 
 
 def load_dataset(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def run_search(connection, provider, *, mode: str, query: str, top_k: int, method: str | None):
+def run_search(
+    connection,
+    provider,
+    *,
+    mode: str,
+    query: str,
+    top_k: int,
+    method: str | None,
+    rerank_pool_size: int,
+    reranker: CrossEncoderReranker | None,
+):
     if mode == "keyword":
-        return keyword_search_tidb(connection, query, top_k, method)
+        return keyword_search_tidb(connection, query, top_k, method), None
     query_embedding = provider.embed_text(query)
     if mode == "vector":
-        return vector_search_tidb(connection, query_embedding, top_k, method)
-    keyword_hits = keyword_search_tidb(connection, query, top_k * 2, method)
-    vector_hits = vector_search_tidb(connection, query_embedding, top_k * 2, method)
-    return reciprocal_rank_fusion(keyword_hits, vector_hits, top_k)
+        return vector_search_tidb(connection, query_embedding, top_k, method), None
+    keyword_hits = keyword_search_tidb(connection, query, rerank_pool_size, method)
+    vector_hits = vector_search_tidb(connection, query_embedding, rerank_pool_size, method)
+    hybrid_hits = reciprocal_rank_fusion(keyword_hits, vector_hits, rerank_pool_size)
+    if mode == "hybrid":
+        return hybrid_hits[:top_k], None
+    if reranker is None:
+        raise RuntimeError("reranker is required for hybrid_rerank mode")
+    reranked, debug_rows = rerank_hits(query, hybrid_hits, reranker, top_k=top_k)
+    return reranked, {
+        "query": query,
+        "pool_size": rerank_pool_size,
+        "hybrid_hits": [
+            {
+                "segment_id": hit.segment_id,
+                "score": hit.score,
+                "score_type": hit.score_type,
+                "content_preview": hit.content[:160],
+            }
+            for hit in hybrid_hits
+        ],
+        "reranked_hits": debug_rows,
+    }
 
 
 def format_table(rows: list[dict], ks: list[int]) -> str:
@@ -94,32 +124,46 @@ def main() -> int:
     parser.add_argument("--provider", choices=["mock", "gemini"], default="gemini")
     parser.add_argument("--gemini-model", default=None)
     parser.add_argument("--embedding-model", default=None)
+    parser.add_argument("--modes", default="vector,hybrid,hybrid_rerank")
+    parser.add_argument("--rerank-model", default=DEFAULT_RERANK_MODEL)
+    parser.add_argument("--rerank-device", default=None)
+    parser.add_argument("--rerank-pool-size", type=int, default=20)
+    parser.add_argument("--dump-rerank-details", default=None)
+    parser.add_argument("--dump-rerank-limit", type=int, default=5)
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset).expanduser().resolve()
     output_json = Path(args.output_json).expanduser().resolve()
     output_csv = Path(args.output_csv).expanduser().resolve()
+    dump_rerank_details = Path(args.dump_rerank_details).expanduser().resolve() if args.dump_rerank_details else None
     ks = [int(item) for item in args.ks.split(",") if item.strip()]
+    modes = [item.strip() for item in args.modes.split(",") if item.strip()]
     dataset = load_dataset(dataset_path)
     queries = dataset["queries"]
 
     config = parse_tidb_config()
     connection = tidb_connect(config)
     provider = make_provider(args.provider, args.gemini_model, args.embedding_model)
+    reranker = None
+    if "hybrid_rerank" in modes:
+        reranker = CrossEncoderReranker(args.rerank_model, device=args.rerank_device)
 
     try:
         summaries = []
         details = []
-        for mode in ["keyword", "vector", "hybrid"]:
+        rerank_debug = []
+        for mode in modes:
             per_query = []
             for item in queries:
-                hits = run_search(
+                hits, rerank_detail = run_search(
                     connection,
                     provider,
                     mode=mode,
                     query=item["query"],
                     top_k=args.top_k,
                     method=args.method,
+                    rerank_pool_size=args.rerank_pool_size,
+                    reranker=reranker,
                 )
                 retrieved_ids = [hit.segment_id for hit in hits]
                 relevant_ids = set(int(value) for value in item["relevant_ids"])
@@ -136,6 +180,15 @@ def main() -> int:
                     metrics[f"ndcg@{k}"] = ndcg_at_k(retrieved_ids, relevant_ids, k)
                 per_query.append(metrics)
                 details.append(metrics)
+                if rerank_detail and len(rerank_debug) < args.dump_rerank_limit:
+                    rerank_debug.append(
+                        {
+                            "query_id": item["query_id"],
+                            "mode": mode,
+                            "relevant_ids": sorted(relevant_ids),
+                            **rerank_detail,
+                        }
+                    )
 
             summary = {
                 "mode": mode,
@@ -155,8 +208,12 @@ def main() -> int:
             "database": config.database,
             "top_k": args.top_k,
             "ks": ks,
+            "modes": modes,
             "method": args.method,
             "provider": args.provider,
+            "rerank_model": args.rerank_model if "hybrid_rerank" in modes else None,
+            "rerank_device": args.rerank_device,
+            "rerank_pool_size": args.rerank_pool_size,
         },
         "summary": summaries,
         "details": details,
@@ -164,9 +221,14 @@ def main() -> int:
     output_json.parent.mkdir(parents=True, exist_ok=True)
     output_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     write_csv(output_csv, summaries, ks)
+    if dump_rerank_details:
+        dump_rerank_details.parent.mkdir(parents=True, exist_ok=True)
+        dump_rerank_details.write_text(json.dumps({"queries": rerank_debug}, ensure_ascii=False, indent=2), encoding="utf-8")
     print(format_table(summaries, ks))
     print(f"\nSaved JSON: {output_json}")
     print(f"Saved CSV:  {output_csv}")
+    if dump_rerank_details:
+        print(f"Saved rerank dump: {dump_rerank_details}")
     return 0
 
 

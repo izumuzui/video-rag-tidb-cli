@@ -15,12 +15,15 @@
 - TiDB Cloud の初期化
 - TiDB Cloud へのセグメント投入
 - TiDB Cloud 上での keyword / vector / hybrid 検索
+- Docker 上での `hybrid_rerank` 評価実行
 
 ## 動作環境
 
 - Python 3.11+
 - `ffmpeg`
 - `ffprobe`
+
+Reranker を使う評価は `torch` や `sentence-transformers` が必要になるため、Mac の素の環境を汚したくない場合は Docker 実行前提。
 
 ## セットアップ
 
@@ -128,6 +131,36 @@ Gemini で生成した index を検索するときは、クエリ側も `--provi
 - `keyword`
 - `vector`
 - `hybrid`
+- `hybrid_rerank`
+
+## Reranker 評価を Docker で回す
+
+Cross-Encoder の reranker は CPU でも動作可能。ただし追加依存はやや重め。このリポジトリでは Docker で隔離実行。
+
+ビルド手順:
+
+```bash
+docker build -t video-rag-rerank .
+```
+
+評価実行例:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  -v "$PWD":/app \
+  -v "$HOME/.cache/huggingface":/cache/huggingface \
+  video-rag-rerank \
+  python eval/run_eval.py \
+    --dataset eval/qvhighlights_loaded_multi_frame_dataset.json \
+    --output-json eval/qvhighlights_loaded_multi_frame_results_rerank.json \
+    --output-csv eval/qvhighlights_loaded_multi_frame_results_rerank.csv \
+    --dump-rerank-details eval/qvhighlights_loaded_multi_frame_rerank_debug.json \
+    --method multi_frame \
+    --provider gemini \
+    --modes vector,hybrid,hybrid_rerank \
+    --rerank-pool-size 20
+```
 
 ## 実装メモ
 
@@ -146,7 +179,8 @@ Gemini で生成した index を検索するときは、クエリ側も `--provi
 - `keyword`: 単語分割した `LIKE` ベースの簡易キーワード検索
 - `vector`: TiDB の `VEC_COSINE_DISTANCE()` を使ったベクトル検索
 - `hybrid`: 両者の順位を RRF で統合した検索
+- `hybrid_rerank`: `hybrid` の上位候補を Cross-Encoder で並べ替える評価用検索
 
 ## 注意
 
-このリポジトリは記事用の実験コード。実運用向けにエラーハンドリング、テスト、入出力形式、認証まわりを整えたものではない。
+このリポジトリは記事用の実験コード。実運用向けのエラーハンドリング、テスト、入出力形式、認証まわりの未整備。
